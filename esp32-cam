@@ -1,0 +1,145 @@
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include "esp_camera.h"
+
+// ===== WIFI =====
+const char* WIFI_SSID = "Ayaflo";
+const char* WIFI_PASS = "12345678tan";
+
+// ===== WS SERVER =====
+// Nếu server bạn chạy HTTPS/WSS (443), dùng beginSSL; nếu ws thường (80/8080), dùng begin().
+const char* WS_HOST = "esp32-car-server.onrender.com";
+const uint16_t WS_PORT = 443;
+const char* WS_PATH = "/cam";
+
+WebSocketsClient ws;
+
+// ===== AI THINKER PINOUT =====
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+// ~30 fps => ~33ms/frame
+static uint32_t lastFrameMs = 0;
+static const uint32_t FRAME_INTERVAL_MS = 33; // 1000/30 ≈ 33.3
+
+void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      Serial.println("[WS] cam connected");
+      ws.sendTXT("type:cam");
+      break;
+    case WStype_DISCONNECTED:
+      Serial.println("[WS] cam disconnected");
+      break;
+    default:
+      break;
+  }
+}
+
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("WiFi connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void setupCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_d0       = Y2_GPIO_NUM;
+  config.pin_d1       = Y3_GPIO_NUM;
+  config.pin_d2       = Y4_GPIO_NUM;
+  config.pin_d3       = Y5_GPIO_NUM;
+  config.pin_d4       = Y6_GPIO_NUM;
+  config.pin_d5       = Y7_GPIO_NUM;
+  config.pin_d6       = Y8_GPIO_NUM;
+  config.pin_d7       = Y9_GPIO_NUM;
+  config.pin_xclk     = XCLK_GPIO_NUM;
+  config.pin_pclk     = PCLK_GPIO_NUM;
+  config.pin_vsync    = VSYNC_GPIO_NUM;
+  config.pin_href     = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_reset    = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+
+  if (psramFound()) {
+    // Ưu tiên fps cao: QVGA hoặc CIF; chất lượng cao hơn (số lớn) -> kích thước nhỏ -> gửi nhanh [web:154]
+    config.frame_size   = FRAMESIZE_QVGA;   // 320x240 (có thể thử FRAMESIZE_CIF 400x296)
+    config.jpeg_quality = 16;               // 10..20; số càng lớn nén càng mạnh -> file nhỏ
+    config.fb_count     = 2;                // 2 buffer giúp pipeline mượt hơn khi có PSRAM
+  } else {
+    config.frame_size   = FRAMESIZE_QQVGA;  // không PSRAM -> hạ thấp hơn để giữ fps
+    config.jpeg_quality = 18;
+    config.fb_count     = 1;
+  }
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed: 0x%x\n", err);
+    delay(1000);
+    ESP.restart();
+  }
+}
+
+void setupWebSocket() {
+  ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+  ws.onEvent(wsEvent);
+  ws.setReconnectInterval(3000);
+  // Heartbeat để giữ kết nối ổn định khi idle (nếu server hỗ trợ ping/pong) [web:154]
+  ws.enableHeartbeat(15000, 3000, 2);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  connectWiFi();
+  setupCamera();
+  setupWebSocket();
+}
+
+void loop() {
+  ws.loop();
+
+  // Gửi frame nếu WS đã kết nối và đủ nhịp cho ~30 fps
+  if (ws.isConnected() && (millis() - lastFrameMs >= FRAME_INTERVAL_MS)) {
+    lastFrameMs = millis();
+
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Camera capture failed");
+      return;
+    }
+
+    // Gửi JPEG binary frame
+    ws.sendBIN(fb->buf, fb->len);
+
+    esp_camera_fb_return(fb);
+  }
+
+  yield();
+}
