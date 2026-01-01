@@ -1,0 +1,305 @@
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <driver/i2s.h>
+
+// ================= PIN L298N (ESP32-S3) =================
+#define IN1 15
+#define IN2 16
+#define IN3 17
+#define IN4 18
+
+// ================= I2S MIC (INMP441) =================
+static const i2s_port_t I2S_MIC_PORT = I2S_NUM_0;
+#define MIC_SD   4
+#define MIC_SCK  2   // BCLK
+#define MIC_WS   3   // LRCK/WS
+
+// ================= I2S AMP (MAX98357) =================
+static const i2s_port_t I2S_SPK_PORT = I2S_NUM_1;
+#define SPK_DIN  8
+#define SPK_BCLK 7
+#define SPK_LRC  6
+
+// ================= WIFI + WEBSOCKET =================
+const char* WIFI_SSID     = "Ayaflo";
+const char* WIFI_PASSWORD = "12345678tan";
+
+const char* WS_HOST = "27.71.20.43";
+const uint16_t WS_PORT = 8080;
+
+// Tách path
+const char* WS_PATH_CAR     = "/car";
+const char* WS_PATH_MIC     = "/mic";
+const char* WS_PATH_SPEAKER = "/speaker";
+
+// 3 websocket client độc lập
+WebSocketsClient wsCar;
+WebSocketsClient wsMic;
+WebSocketsClient wsSpeaker;
+
+// ================= AUDIO SETTINGS =================
+static const int AUDIO_SR = 16000;
+
+static const size_t MIC_SAMPLES_PER_CHUNK = 512;
+static int16_t mic_pcm16[MIC_SAMPLES_PER_CHUNK];
+static int32_t mic_raw32[MIC_SAMPLES_PER_CHUNK];
+
+static inline int16_t mic32_to_pcm16(int32_t v) {
+  v >>= 14;                 // có thể cần tinh chỉnh theo module
+  if (v > 32767) v = 32767;
+  if (v < -32768) v = -32768;
+  return (int16_t)v;
+}
+
+// ================= MOTOR CONTROL =================
+void setSteering(int dir) {
+  if (dir < 0) {        // trái
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+  } else if (dir > 0) { // phải
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+  } else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+  }
+}
+
+void setDrive(int dir) {
+  if (dir > 0) {        // tiến
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  } else if (dir < 0) { // lùi
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+  } else {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+  }
+}
+
+void goStop()          { setSteering(0);  setDrive(0);  }
+void goForward()       { setSteering(0);  setDrive(1);  }
+void goBackward()      { setSteering(0);  setDrive(-1); }
+void goForwardLeft()   { setSteering(-1); setDrive(1);  }
+void goForwardRight()  { setSteering(1);  setDrive(1);  }
+void goBackwardLeft()  { setSteering(-1); setDrive(-1); }
+void goBackwardRight() { setSteering(1);  setDrive(-1); }
+
+void handleCmdByte(uint8_t c) {
+  switch (c) {
+    case '1': goStop(); break;
+    case '2': goForward(); break;
+    case '3': goBackward(); break;
+    case '4': goForwardLeft(); break;
+    case '5': goForwardRight(); break;
+    case '6': goBackwardLeft(); break;
+    case '7': goBackwardRight(); break;
+    default:  goStop(); break;
+  }
+}
+
+// ================= I2S SETUP =================
+void setupI2SMic() {
+  i2s_config_t cfg = {};
+  cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
+  cfg.sample_rate = AUDIO_SR;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+  cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  cfg.dma_buf_count = 6;
+  cfg.dma_buf_len = 256;
+  cfg.use_apll = false;
+
+  i2s_pin_config_t pins = {};
+  pins.bck_io_num = MIC_SCK;
+  pins.ws_io_num = MIC_WS;
+  pins.data_in_num = MIC_SD;
+  pins.data_out_num = I2S_PIN_NO_CHANGE;
+
+  i2s_driver_install(I2S_MIC_PORT, &cfg, 0, NULL);
+  i2s_set_pin(I2S_MIC_PORT, &pins);
+  i2s_zero_dma_buffer(I2S_MIC_PORT);
+}
+
+void setupI2SSpeaker() {
+  i2s_config_t cfg = {};
+  cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  cfg.sample_rate = AUDIO_SR;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+  cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  cfg.dma_buf_count = 8;
+  cfg.dma_buf_len = 256;
+  cfg.use_apll = false;
+  cfg.tx_desc_auto_clear = true;
+
+  i2s_pin_config_t pins = {};
+  pins.bck_io_num = SPK_BCLK;
+  pins.ws_io_num = SPK_LRC;
+  pins.data_out_num = SPK_DIN;
+  pins.data_in_num = I2S_PIN_NO_CHANGE;
+
+  i2s_driver_install(I2S_SPK_PORT, &cfg, 0, NULL);
+  i2s_set_pin(I2S_SPK_PORT, &pins);
+  i2s_zero_dma_buffer(I2S_SPK_PORT);
+}
+
+// ================= WS EVENTS =================
+// /car: nhận lệnh text '1'..'7'
+void wsCarEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[/car] Disconnected");
+      goStop();
+      break;
+
+    case WStype_CONNECTED:
+      Serial.printf("[/car] Connected: %s\n", payload);
+      wsCar.sendTXT("type:car");
+      break;
+
+    case WStype_TEXT:
+      if (length >= 1) handleCmdByte(payload[0]);
+      else goStop();
+      break;
+
+    case WStype_BIN:
+      // nếu sau này muốn nhận cmd dạng binary 0x01..0x07 thì xử lý ở đây
+      break;
+
+    default:
+      break;
+  }
+}
+
+// /mic: chủ yếu gửi lên; vẫn log trạng thái
+void wsMicEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[/mic] Disconnected");
+      break;
+    case WStype_CONNECTED:
+      Serial.printf("[/mic] Connected: %s\n", payload);
+      wsMic.sendTXT("type:mic");
+      break;
+    default:
+      break;
+  }
+}
+
+// /speaker: nhận audio BIN từ server để phát ra MAX98357
+void wsSpeakerEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[/speaker] Disconnected");
+      break;
+
+    case WStype_CONNECTED:
+      Serial.printf("[/speaker] Connected: %s\n", payload);
+      wsSpeaker.sendTXT("type:speaker");
+      break;
+
+    case WStype_BIN: {
+      if (length > 0) {
+        size_t written = 0;
+        i2s_write(I2S_SPK_PORT, payload, length, &written, 0);
+      }
+      break;
+    }
+
+    case WStype_TEXT:
+      // optional: server gửi text để điều khiển volume/mute...
+      break;
+
+    default:
+      break;
+  }
+}
+
+// ================= WIFI + WS CONNECT =================
+void connectWiFi() {
+  Serial.print("Connecting WiFi: ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  uint8_t retries = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+    Serial.print(".");
+    if (++retries >= 150) ESP.restart();
+  }
+
+  Serial.println("\nWiFi connected!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void connectWebSockets() {
+  // begin(host, port, url) theo API của arduinoWebSockets [web:8]
+  wsCar.begin(WS_HOST, WS_PORT, WS_PATH_CAR);
+  wsCar.onEvent(wsCarEvent);
+  wsCar.setReconnectInterval(5000);
+  wsCar.enableHeartbeat(15000, 3000, 2);
+
+  wsMic.begin(WS_HOST, WS_PORT, WS_PATH_MIC);
+  wsMic.onEvent(wsMicEvent);
+  wsMic.setReconnectInterval(5000);
+  wsMic.enableHeartbeat(15000, 3000, 2);
+
+  wsSpeaker.begin(WS_HOST, WS_PORT, WS_PATH_SPEAKER);
+  wsSpeaker.onEvent(wsSpeakerEvent);
+  wsSpeaker.setReconnectInterval(5000);
+  wsSpeaker.enableHeartbeat(15000, 3000, 2);
+}
+
+// ================= MIC STREAM =================
+void streamMicToServer() {
+  if (!wsMic.isConnected()) return;
+
+  size_t bytes_read = 0;
+  esp_err_t err = i2s_read(I2S_MIC_PORT, mic_raw32, sizeof(mic_raw32), &bytes_read, 0);
+  if (err != ESP_OK || bytes_read == 0) return;
+
+  size_t samples = bytes_read / sizeof(int32_t);
+  if (samples > MIC_SAMPLES_PER_CHUNK) samples = MIC_SAMPLES_PER_CHUNK;
+
+  for (size_t i = 0; i < samples; i++) {
+    mic_pcm16[i] = mic32_to_pcm16(mic_raw32[i]);
+  }
+
+  wsMic.sendBIN((uint8_t*)mic_pcm16, samples * sizeof(int16_t));
+}
+
+// ================= SETUP / LOOP =================
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  goStop();
+
+  setupI2SMic();
+  setupI2SSpeaker();
+
+  connectWiFi();
+  connectWebSockets();
+}
+
+void loop() {
+  wsCar.loop();
+  wsMic.loop();
+  wsSpeaker.loop();
+
+  // đẩy mic lên server qua /mic
+  streamMicToServer();
+
+  delay(1);
+}
