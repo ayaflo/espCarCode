@@ -8,8 +8,10 @@ const char* WIFI_PASS = "12345678tan";
 
 // ===== WS SERVER =====
 // Nếu server bạn chạy HTTPS/WSS (443), dùng beginSSL; nếu ws thường (80/8080), dùng begin().
-const char* WS_HOST = "esp32-car-server.onrender.com";
-const uint16_t WS_PORT = 443;
+//const char* WS_HOST = "esp32-car-server.onrender.com";
+//const uint16_t WS_PORT = 443;
+const char* WS_HOST = "27.71.20.43";
+const uint16_t WS_PORT = 8080;
 const char* WS_PATH = "/cam";
 
 WebSocketsClient ws;
@@ -34,7 +36,7 @@ WebSocketsClient ws;
 
 // ~30 fps => ~33ms/frame
 static uint32_t lastFrameMs = 0;
-static const uint32_t FRAME_INTERVAL_MS = 33; // 1000/30 ≈ 33.3
+static const uint32_t FRAME_INTERVAL_MS = 40; // 1000/30 ≈ 33.3
 
 void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
@@ -88,7 +90,7 @@ void setupCamera() {
 
   if (psramFound()) {
     // Ưu tiên fps cao: QVGA hoặc CIF; chất lượng cao hơn (số lớn) -> kích thước nhỏ -> gửi nhanh [web:154]
-    config.frame_size   = FRAMESIZE_QVGA;   // 320x240 (có thể thử FRAMESIZE_CIF 400x296)
+    config.frame_size   = FRAMESIZE_QQVGA;   // 320x240 (có thể thử FRAMESIZE_CIF 400x296)
     config.jpeg_quality = 16;               // 10..20; số càng lớn nén càng mạnh -> file nhỏ
     config.fb_count     = 2;                // 2 buffer giúp pipeline mượt hơn khi có PSRAM
   } else {
@@ -106,7 +108,8 @@ void setupCamera() {
 }
 
 void setupWebSocket() {
-  ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+  //ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+  ws.begin(WS_HOST, WS_PORT, WS_PATH);
   ws.onEvent(wsEvent);
   ws.setReconnectInterval(3000);
   // Heartbeat để giữ kết nối ổn định khi idle (nếu server hỗ trợ ping/pong) [web:154]
@@ -130,10 +133,10 @@ void loop() {
     lastFrameMs = millis();
 
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Camera capture failed");
-      return;
-    }
+    //if (!fb) {
+    //  Serial.println("Camera capture failed");
+    //  return;
+    //}
 
     // Gửi JPEG binary frame
     ws.sendBIN(fb->buf, fb->len);
