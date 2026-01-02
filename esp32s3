@@ -7,6 +7,15 @@
 #define IN2 16
 #define IN3 17
 #define IN4 18
+#define ENB 42   // motor sau (kênh B) - đã tháo jumper và nối vào GPIO42
+#define ENA 41
+
+// ===== ADD: PWM settings for rear motor (IN3/IN4) =====
+static const uint32_t DRIVE_PWM_FREQ = 20000;   // 20 kHz (êm hơn, ít nghe tiếng)
+static const uint8_t  DRIVE_PWM_RES  = 8;       // 8-bit: 0..255
+//static const uint8_t  DRIVE_SPEED    = 200;     // 0..255 (càng nhỏ càng chậm) -> chỉnh ở đây
+static const uint8_t  DRIVE_SPEED_BACK    = 205;     // 0..255 (càng nhỏ càng chậm) -> chỉnh ở đây
+static const uint8_t  DRIVE_SPEED_FRONT    = 220;
 
 // ================= I2S MIC (INMP441) =================
 static const i2s_port_t I2S_MIC_PORT = I2S_NUM_0;
@@ -40,7 +49,8 @@ WebSocketsClient wsSpeaker;
 // ================= AUDIO SETTINGS =================
 static const int AUDIO_SR = 16000;
 
-static const size_t MIC_SAMPLES_PER_CHUNK = 512;
+//static const size_t MIC_SAMPLES_PER_CHUNK = 512;
+static const size_t MIC_SAMPLES_PER_CHUNK = 2048;
 static int16_t mic_pcm16[MIC_SAMPLES_PER_CHUNK];
 static int32_t mic_raw32[MIC_SAMPLES_PER_CHUNK];
 
@@ -56,12 +66,15 @@ void setSteering(int dir) {
   if (dir < 0) {        // trái
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
+    //ledcWrite(ENA, DRIVE_SPEED_FRONT);
   } else if (dir > 0) { // phải
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, HIGH);
+    //ledcWrite(ENA, DRIVE_SPEED_FRONT);
   } else {
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
+    ledcWrite(ENA, 0);
   }
 }
 
@@ -69,22 +82,26 @@ void setDrive(int dir) {
   if (dir > 0) {        // tiến
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
+    //ledcWrite(ENB, DRIVE_SPEED_BACK);
   } else if (dir < 0) { // lùi
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, HIGH);
-  } else {
+    //ledcWrite(ENB, DRIVE_SPEED_BACK);
+  } else {              // dừng
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, LOW);
+    ledcWrite(ENB, 0);
   }
 }
 
+
 void goStop()          { setSteering(0);  setDrive(0);  }
-void goForward()       { setSteering(0);  setDrive(1);  }
-void goBackward()      { setSteering(0);  setDrive(-1); }
-void goForwardLeft()   { setSteering(-1); setDrive(1);  }
-void goForwardRight()  { setSteering(1);  setDrive(1);  }
-void goBackwardLeft()  { setSteering(-1); setDrive(-1); }
-void goBackwardRight() { setSteering(1);  setDrive(-1); }
+void goForward()       { setSteering(0);  setDrive(1); ledcWrite(ENB, DRIVE_SPEED_BACK-10); }
+void goBackward()      { setSteering(0);  setDrive(-1); ledcWrite(ENB, DRIVE_SPEED_BACK-10);}
+void goForwardLeft()   { ledcWrite(ENA, DRIVE_SPEED_FRONT);ledcWrite(ENB, DRIVE_SPEED_BACK+10);setSteering(-1); setDrive(1);  }
+void goForwardRight()  { ledcWrite(ENA, DRIVE_SPEED_FRONT);ledcWrite(ENB, DRIVE_SPEED_BACK+10);setSteering(1);  setDrive(1);  }
+void goBackwardLeft()  { ledcWrite(ENA, DRIVE_SPEED_FRONT);ledcWrite(ENB, DRIVE_SPEED_BACK+10);setSteering(-1); setDrive(-1); }
+void goBackwardRight() { ledcWrite(ENA, DRIVE_SPEED_FRONT);ledcWrite(ENB, DRIVE_SPEED_BACK+10);setSteering(1);  setDrive(-1); }
 
 void handleCmdByte(uint8_t c) {
   switch (c) {
@@ -128,7 +145,9 @@ void setupI2SSpeaker() {
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
   cfg.sample_rate = AUDIO_SR;
   cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  //cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+
   cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
   cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
   cfg.dma_buf_count = 8;
@@ -152,12 +171,12 @@ void setupI2SSpeaker() {
 void wsCarEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
-      Serial.println("[/car] Disconnected");
+      //Serial.println("[/car] Disconnected");
       goStop();
       break;
 
     case WStype_CONNECTED:
-      Serial.printf("[/car] Connected: %s\n", payload);
+      //Serial.printf("[/car] Connected: %s\n", payload);
       wsCar.sendTXT("type:car");
       break;
 
@@ -179,10 +198,10 @@ void wsCarEvent(WStype_t type, uint8_t* payload, size_t length) {
 void wsMicEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
-      Serial.println("[/mic] Disconnected");
+      //Serial.println("[/mic] Disconnected");
       break;
     case WStype_CONNECTED:
-      Serial.printf("[/mic] Connected: %s\n", payload);
+      //Serial.printf("[/mic] Connected: %s\n", payload);
       wsMic.sendTXT("type:mic");
       break;
     default:
@@ -194,19 +213,32 @@ void wsMicEvent(WStype_t type, uint8_t* payload, size_t length) {
 void wsSpeakerEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
-      Serial.println("[/speaker] Disconnected");
+      //Serial.println("[/speaker] Disconnected");
       break;
 
     case WStype_CONNECTED:
-      Serial.printf("[/speaker] Connected: %s\n", payload);
+      //Serial.printf("[/speaker] Connected: %s\n", payload);
       wsSpeaker.sendTXT("type:speaker");
       break;
 
     case WStype_BIN: {
-      if (length > 0) {
-        size_t written = 0;
-        i2s_write(I2S_SPK_PORT, payload, length, &written, 0);
+      //if (length > 0) {
+      //  size_t written = 0;
+      //  i2s_write(I2S_SPK_PORT, payload, length, &written, 0);
+      //}
+      size_t samples = length / 2;
+      static int16_t stereo[2048 * 2]; // đủ cho chunk; nếu length lớn hơn thì cần malloc/segment
+      if (samples > 2048) samples = 2048;
+
+      const int16_t* mono = (const int16_t*)payload;
+      for (size_t i = 0; i < samples; i++) {
+        stereo[2*i]   = mono[i]; // L
+        stereo[2*i+1] = mono[i]; // R
       }
+
+      size_t written = 0;
+      i2s_write(I2S_SPK_PORT, stereo, samples * 2 * sizeof(int16_t), &written, 0);
+      //i2s_write(I2S_SPK_PORT, stereo, samples * 2 * sizeof(int16_t), &written, portMAX_DELAY);
       break;
     }
 
@@ -221,8 +253,8 @@ void wsSpeakerEvent(WStype_t type, uint8_t* payload, size_t length) {
 
 // ================= WIFI + WS CONNECT =================
 void connectWiFi() {
-  Serial.print("Connecting WiFi: ");
-  Serial.println(WIFI_SSID);
+ //Serial.print("Connecting WiFi: ");
+  //Serial.println(WIFI_SSID);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -230,13 +262,13 @@ void connectWiFi() {
   uint8_t retries = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(200);
-    Serial.print(".");
+    //Serial.print(".");
     if (++retries >= 150) ESP.restart();
   }
 
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
+  //Serial.println("\nWiFi connected!");
+  //Serial.print("IP: ");
+  //Serial.println(WiFi.localIP());
 }
 
 void connectWebSockets() {
@@ -277,13 +309,24 @@ void streamMicToServer() {
 
 // ================= SETUP / LOOP =================
 void setup() {
-  Serial.begin(115200);
-  delay(200);
+  //Serial.begin(115200);
+  delay(400);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  
 
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
+
+   // PWM trên ENB
+  ledcAttach(ENB, DRIVE_PWM_FREQ, DRIVE_PWM_RES);
+  ledcWrite(ENB, 0); // ban đầu dừng
+
+  ledcAttach(ENA, DRIVE_PWM_FREQ, DRIVE_PWM_RES);
+  ledcWrite(ENA, 0); // ban đầu dừng
+
   goStop();
 
   setupI2SMic();
@@ -301,5 +344,5 @@ void loop() {
   // đẩy mic lên server qua /mic
   streamMicToServer();
 
-  delay(1);
+  delay(2);
 }
