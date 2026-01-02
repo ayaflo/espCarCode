@@ -36,7 +36,7 @@ WebSocketsClient ws;
 
 // ~30 fps => ~33ms/frame
 static uint32_t lastFrameMs = 0;
-static const uint32_t FRAME_INTERVAL_MS = 40; // 1000/30 ≈ 33.3
+static const uint32_t FRAME_INTERVAL_MS = 30; // 1000/30 ≈ 33.3
 
 void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
@@ -120,29 +120,51 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  
+
   connectWiFi();
   setupCamera();
   setupWebSocket();
 }
 
+// void loop() {
+//   ws.loop();
+
+//   // Gửi frame nếu WS đã kết nối và đủ nhịp cho ~30 fps
+//   if (ws.isConnected() && (millis() - lastFrameMs >= FRAME_INTERVAL_MS)) {
+//     lastFrameMs = millis();
+
+//     camera_fb_t* fb = esp_camera_fb_get();
+//     //if (!fb) {
+//     //  Serial.println("Camera capture failed");
+//     //  return;
+//     //}
+
+//     // Gửi JPEG binary frame
+//     ws.sendBIN(fb->buf, fb->len);
+
+//     esp_camera_fb_return(fb);
+//   }
+
+//   yield();
+// }
 void loop() {
   ws.loop();
 
-  // Gửi frame nếu WS đã kết nối và đủ nhịp cho ~30 fps
-  if (ws.isConnected() && (millis() - lastFrameMs >= FRAME_INTERVAL_MS)) {
-    lastFrameMs = millis();
+  static uint32_t lastFrameMs = 0;
+  if (!ws.isConnected()) return;
 
-    camera_fb_t* fb = esp_camera_fb_get();
-    //if (!fb) {
-    //  Serial.println("Camera capture failed");
-    //  return;
-    //}
+  if (millis() - lastFrameMs < 40) return;
+  lastFrameMs = millis();
 
-    // Gửi JPEG binary frame
-    ws.sendBIN(fb->buf, fb->len);
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) return;
 
-    esp_camera_fb_return(fb);
+  bool ok = ws.sendBIN(fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+
+  if (!ok) {
+    delay(5); // nhường CPU nếu send fail
   }
-
-  yield();
 }
