@@ -6,38 +6,39 @@ struct AppConfig;
 #include <WebSocketsClient.h>
 #include <driver/i2s.h>
 
-// ================= PIN L298N (ESP32-S3) =================
+// PIN L298N (ESP32-S3)
 #define IN1 15
 #define IN2 16
 #define IN3 17
 #define IN4 18
-#define ENB 42   // motor sau (kênh B)
-#define ENA 41   // motor trước (kênh A)
+#define ENB 42 // motor sau (kênh B)
+#define ENA 41 // motor trước (kênh A)
 
-// ===== PWM settings =====
+// PWM settings
 static const uint32_t DRIVE_PWM_FREQ = 20000; // 20 kHz
 static const uint8_t  DRIVE_PWM_RES  = 8;     // 0..255
 static const uint8_t  DRIVE_SPEED_BACK  = 210;
 static const uint8_t  DRIVE_SPEED_FRONT = 255;
 
-// ================= I2S MIC (INMP441) =================
+// I2S MIC (INMP441)
 static const i2s_port_t I2S_MIC_PORT = I2S_NUM_0;
-#define MIC_SD   4
-#define MIC_SCK  2   // BCLK
-#define MIC_WS   3   // LRCK/WS
+#define MIC_SD  4
+#define MIC_SCK 2 // BCLK
+#define MIC_WS  3 // LRCK/WS
 
-// ================= I2S AMP (MAX98357) =================
+// I2S AMP (MAX98357)
 static const i2s_port_t I2S_SPK_PORT = I2S_NUM_1;
 #define SPK_DIN  8
 #define SPK_BCLK 7
 #define SPK_LRC  6
 
-// ================= AUDIO SETTINGS =================
+// AUDIO SETTINGS
 static const int AUDIO_SR = 16000;
 static const size_t MIC_SAMPLES_PER_CHUNK = 2048;
 static int16_t mic_pcm16[MIC_SAMPLES_PER_CHUNK];
 static int32_t mic_raw32[MIC_SAMPLES_PER_CHUNK];
 
+/** Convert 32-bit sample to 16-bit PCM with clamping */
 static inline int16_t mic32_to_pcm16(int32_t v) {
   v >>= 14;
   if (v > 32767) v = 32767;
@@ -45,7 +46,7 @@ static inline int16_t mic32_to_pcm16(int32_t v) {
   return (int16_t)v;
 }
 
-// ================= WEBSOCKET PATHS =================
+// WEBSOCKET PATHS
 const char* WS_PATH_CAR     = "/car";
 const char* WS_PATH_MIC     = "/mic";
 const char* WS_PATH_SPEAKER = "/speaker";
@@ -54,7 +55,7 @@ WebSocketsClient wsCar;
 WebSocketsClient wsMic;
 WebSocketsClient wsSpeaker;
 
-// ================= CONFIG STORAGE (NVS) =================
+// CONFIG STORAGE (NVS)
 Preferences prefs;
 
 struct AppConfig {
@@ -67,7 +68,7 @@ struct AppConfig {
 
 static AppConfig gCfg;
 
-// ================= CAPTIVE PORTAL =================
+// CAPTIVE PORTAL
 static const byte DNS_PORT = 53;
 DNSServer dnsServer;
 WebServer server(80);
@@ -182,10 +183,6 @@ static void handleSave() {
 
 static void startCaptivePortal() {
   gPortalMode = true;
-
-  // An toàn: dừng xe khi vào mode cấu hình
-  // (tránh trường hợp mất WS mà xe vẫn chạy)
-  // goStop() sẽ được khai báo phía dưới, nên forward declare:
 }
 
 static void setupCaptivePortal() {
@@ -226,7 +223,7 @@ static AppConfig loadConfig() {
   return c;
 }
 
-// ================= UART TO ESP32-CAM (GPIO43/12) =================
+// UART TO ESP32-CAM (GPIO43/12)
 static const int CAM_UART_TX = 43; // ESP32-S3 GPIO43 -> ESP32-CAM GPIO3 (RX)
 static const int CAM_UART_RX = 44; // ESP32-S3 GPIO44 -> ESP32-CAM GPIO1 (TX)
 static const uint32_t CAM_BAUD = 115200;
@@ -242,7 +239,7 @@ static void sendConfigToCam(const AppConfig& c) {
   Serial1.flush();
 }
 
-// ================= MOTOR CONTROL =================
+// MOTOR CONTROL
 void setSteering(int dir) {
   if (dir < 0) {         // trái
     digitalWrite(IN1, HIGH);
@@ -292,7 +289,7 @@ void handleCmdByte(uint8_t c) {
   }
 }
 
-// ================= I2S SETUP =================
+// I2S SETUP
 void setupI2SMic() {
   i2s_config_t cfg = {};
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
@@ -323,7 +320,8 @@ void setupI2SSpeaker() {
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
   cfg.sample_rate = AUDIO_SR;
   cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-  cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  // cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
   //cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
 
   cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
@@ -345,7 +343,7 @@ void setupI2SSpeaker() {
   i2s_zero_dma_buffer(I2S_SPK_PORT);
 }
 
-// ================= WS EVENTS =================
+// WS EVENTS
 void wsCarEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
@@ -373,6 +371,8 @@ void wsMicEvent(WStype_t type, uint8_t* payload, size_t length) {
   }
 }
 
+static const size_t SPEAKER_SAMPLES_PER_CHUNK = 2048;
+
 void wsSpeakerEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
@@ -381,25 +381,28 @@ void wsSpeakerEvent(WStype_t type, uint8_t* payload, size_t length) {
 
     case WStype_BIN: {
       size_t samples = length / 2;
-      static int16_t stereo[2048 * 2];
-      if (samples > 2048) samples = 2048;
+      // static int16_t stereo[SPEAKER_SAMPLES_PER_CHUNK * 2];
+      if (samples > SPEAKER_SAMPLES_PER_CHUNK) samples = SPEAKER_SAMPLES_PER_CHUNK;
 
-      const int16_t* mono = (const int16_t*)payload;
-      for (size_t i = 0; i < samples; i++) {
-        stereo[2*i]   = mono[i];
-        stereo[2*i+1] = mono[i];
-      }
+      // const int16_t* mono = (const int16_t*)payload;
+      // for (size_t i = 0; i < samples; i++) {
+        // int16_t v = mono[i];
+        // stereo[2*i]   = v;
+        // stereo[2*i+1] = v;
+      // }
 
+      size_t w = 0;
+      i2s_write(I2S_SPK_PORT, payload, samples * sizeof(int16_t), &w, pdMS_TO_TICKS(5));
       //size_t written = 0;
       //i2s_write(I2S_SPK_PORT, stereo, samples * 2 * sizeof(int16_t), &written, 0);
-      size_t total = samples * 2 * sizeof(int16_t);
-      size_t offset = 0, w;
-      while (offset < total) {
-        i2s_write(I2S_SPK_PORT, (uint8_t*)stereo + offset, total - offset, &w, portMAX_DELAY);
-        offset += w;
-      }
-
-
+      // size_t total = samples * 2 * sizeof(int16_t);
+      // size_t offset = 0, w;
+      // while (offset < total) {
+        // i2s_write(I2S_SPK_PORT, (uint8_t*)stereo + offset, total - offset, &w, portMAX_DELAY);
+        // auto ok = i2s_write(I2S_SPK_PORT, (uint8_t*)stereo + offset, total - offset, &w, pdMS_TO_TICKS(5));
+        // if (ok != ESP_OK) break;
+        // offset += w;
+      // }
       break;
     }
 
@@ -408,7 +411,7 @@ void wsSpeakerEvent(WStype_t type, uint8_t* payload, size_t length) {
   }
 }
 
-// ================= WIFI + WS CONNECT =================
+// WIFI + WS CONNECT
 static bool connectWiFiWithConfig(const AppConfig& c, uint32_t timeoutMs) {
   if (!c.valid) return false;
 
@@ -430,7 +433,7 @@ static bool connectWiFiWithConfig(const AppConfig& c, uint32_t timeoutMs) {
 void connectWebSockets(const AppConfig& c) {
   wsCar.begin(c.host.c_str(), c.port, WS_PATH_CAR);
   wsCar.onEvent(wsCarEvent);
-  wsCar.setReconnectInterval(5000);
+  wsCar.setReconnectInterval(3000);
   wsCar.enableHeartbeat(15000, 3000, 2);
 
   wsMic.begin(c.host.c_str(), c.port, WS_PATH_MIC);
@@ -440,13 +443,14 @@ void connectWebSockets(const AppConfig& c) {
 
   wsSpeaker.begin(c.host.c_str(), c.port, WS_PATH_SPEAKER);
   wsSpeaker.onEvent(wsSpeakerEvent);
-  wsSpeaker.setReconnectInterval(5000);
+  wsSpeaker.setReconnectInterval(7000);
   wsSpeaker.enableHeartbeat(15000, 3000, 2);
 }
 
-// ================= MIC STREAM =================
+// MIC STREAM
 void streamMicToServer() {
   if (!wsMic.isConnected()) return;
+  if (ESP.getFreeHeap() < 40 * 1024) return;
 
   size_t bytes_read = 0;
   esp_err_t err = i2s_read(I2S_MIC_PORT, mic_raw32, sizeof(mic_raw32), &bytes_read, 0);
@@ -462,7 +466,7 @@ void streamMicToServer() {
   wsMic.sendBIN((uint8_t*)mic_pcm16, samples * sizeof(int16_t));
 }
 
-// ================= SETUP / LOOP =================
+// SETUP / LOOP
 void setup() {
   delay(400);
 
