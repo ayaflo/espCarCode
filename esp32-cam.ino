@@ -131,18 +131,18 @@ static void disconnectNet() {
   gNetReady = false;
 }
 
-static bool connectWiFiWithCfg(const CamConfig& c, uint32_t timeoutMs) {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(c.ssid.c_str(), c.pass.c_str());
+// static bool connectWiFiWithCfg(const CamConfig& c, uint32_t timeoutMs) {
+//   WiFi.mode(WIFI_STA);
+//   WiFi.setSleep(false);
+//   WiFi.begin(c.ssid.c_str(), c.pass.c_str());
 
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(200);
-    if (millis() - start >= timeoutMs) return false;
-  }
-  return true;
-}
+//   uint32_t start = millis();
+//   while (WiFi.status() != WL_CONNECTED) {
+//     delay(200);
+//     if (millis() - start >= timeoutMs) return false;
+//   }
+//   return true;
+// }
 
 static void setupWebSocketWithCfg(const CamConfig& c) {
   ws.begin(c.host.c_str(), c.port, WS_PATH);
@@ -181,12 +181,16 @@ void setupCamera() {
   if (psramFound()) {
     // config.frame_size   = FRAMESIZE_QQVGA; // 160x120
     config.frame_size   = FRAMESIZE_QVGA; // 640x320
-    config.jpeg_quality = 16;
-    config.fb_count     = 2;
+    // config.jpeg_quality = 16;
+    // config.fb_count     = 2;
+    config.jpeg_quality = 12;
+    config.fb_count     = 3;
+    config.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
     config.frame_size   = FRAMESIZE_QVGA;
     // config.frame_size   = FRAMESIZE_QQVGA; // 160x120
-    config.jpeg_quality = 18;
+    // config.jpeg_quality = 18;
+    config.jpeg_quality = 14;
     config.fb_count     = 1;
   }
 
@@ -203,20 +207,36 @@ static bool sameCfg(const CamConfig& a, const CamConfig& b) {
   return a.ssid == b.ssid && a.pass == b.pass && a.host == b.host && a.port == b.port;
 }
 
+static bool wifiConnecting = false;
+static uint32_t wifiStartMs = 0;
+static const uint32_t WIFI_TIMEOUT_MS = 20000;
+
 static void applyConfigAndConnect(const CamConfig& c) {
   // Nếu đang chạy rồi mà nhận cấu hình mới => reconnect
   disconnectNet();
 
-  if (!connectWiFiWithCfg(c, 20000)) {
-    // Nếu WiFi fail thì quay lại trạng thái chờ config mới
-    gNetReady = false;
-    return;
-  }
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(c.ssid.c_str(), c.pass.c_str());
 
-  if (!gCameraReady) setupCamera();
-  setupWebSocketWithCfg(c);
-  gNetReady = true;
+  wifiConnecting = true;
+  wifiStartMs = millis();
 }
+
+// static void applyConfigAndConnect(const CamConfig& c) {
+//   // Nếu đang chạy rồi mà nhận cấu hình mới => reconnect
+//   disconnectNet();
+
+//   if (!connectWiFiWithCfg(c, 20000)) {
+//     // Nếu WiFi fail thì quay lại trạng thái chờ config mới
+//     gNetReady = false;
+//     return;
+//   }
+
+//   if (!gCameraReady) setupCamera();
+//   setupWebSocketWithCfg(c);
+//   gNetReady = true;
+// }
 
 void setup() {
   // Dùng UART0 để nhận cấu hình từ ESP32-S3 (GPIO3 RX, GPIO1 TX)
@@ -237,31 +257,47 @@ void loop() {
     }
   }
 
-  // 2) Nếu chưa có cấu hình hoặc chưa kết nối mạng => không stream
-  if (!gCfg.valid || !gNetReady) {
-    delay(10);
+  // 2) Non-blocking WiFi connect
+  if (wifiConnecting) {
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!gCameraReady) setupCamera();
+      setupWebSocketWithCfg(gCfg);
+      gNetReady = true;
+      wifiConnecting = false;
+    } else if (millis() - wifiStartMs > WIFI_TIMEOUT_MS) {
+      WiFi.disconnect(true);
+      wifiConnecting = false;
+      gNetReady = false;
+    }
     return;
   }
 
-  // 3) Loop websocket + stream frame
+  // 3) Nếu chưa có cấu hình hoặc chưa kết nối mạng => không stream
+  if (!gCfg.valid || !gNetReady) {
+    // delay(10);
+    return;
+  }
+
+  // 4) Loop websocket + stream frame
   ws.loop();
 
   if (!ws.isConnected()) {
-    delay(5);
+    // delay(5);
     // chờ kết nối tới server websocket
     return;
   }
 
   if (millis() - lastFrameMs < FRAME_INTERVAL_MS) return;
-  lastFrameMs = millis();
 
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return;
 
+  lastFrameMs = millis();
+
   // HEAP GUARD: drop frame để tránh crash -> ko reset ESP
   if (ESP.getFreeHeap() < 30 * 1024) {
     esp_camera_fb_return(fb);
-    delay(5);
+    // delay(5);
     return;
   }
 
